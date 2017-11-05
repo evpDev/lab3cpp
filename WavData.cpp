@@ -5,10 +5,11 @@
 #include <cstring>
 
 wav_errors_e WavData::CreateFromFile(const char* filename) {
+    myfilename = filename;
     std::cout << ">>>> read_header( " << filename << " )\n" << std::endl;
     null_header(header_ptr); // Fill header with zeroes.
     std::cout << "Done!" << std::endl;
-    FILE* f = fopen( filename, "rb" );
+    FILE* f = fopen( myfilename, "rb" );
     if ( !f ) {
         return IO_ERROR;
     }
@@ -120,4 +121,132 @@ wav_headers_errors_e WavData::check_header(size_t file_size_bytes) {
     }
 
     return HEADER_OK;
+}
+
+wav_errors_e WavData::extract_data_int16( const char* filename) {
+    printf( ">>>> extract_data_int16( %s )\n", filename );
+    wav_errors_e err;
+    WavHeader header;
+    err = read_header( filename, &header );
+    if ( err != WAV_OK ) {
+        // Problems with reading a header.
+        return err;
+    }
+
+    if ( header.bitsPerSample != 16 ) {
+        // Only 16-bit samples is supported.
+        return UNSUPPORTED_FORMAT;
+    }
+
+    FILE* f = fopen( filename, "rb" );
+    if ( !f ) {
+        return IO_ERROR;
+    }
+    fseek( f, 44, SEEK_SET ); // Seek to the begining of PCM data.
+
+    int chan_count = header.numChannels;
+    int samples_per_chan = ( header.subchunk2Size / sizeof(short) ) / chan_count;
+
+    // 1. Reading all PCM data from file to a single vector.
+    std::vector<short> all_channels;
+    all_channels.resize( chan_count * samples_per_chan );
+    size_t read_bytes = fread( all_channels.data(), 1, header.subchunk2Size, f );
+    if ( read_bytes != header.subchunk2Size ) {
+        printf( "extract_data_int16() read only %zu of %u\n", read_bytes, header.subchunk2Size );
+        return IO_ERROR;
+    }
+    fclose( f );
+
+
+    // 2. Put all channels to its own vector.
+    channels_data.resize( chan_count );
+    for ( size_t ch = 0; ch < channels_data.size(); ch++ ) {
+        channels_data[ ch ].resize( samples_per_chan );
+    }
+
+    for ( int ch = 0; ch < chan_count; ch++ ) {
+        std::vector<short>& chdata = channels_data[ ch ];
+        for ( size_t i = 0; i < samples_per_chan; i++ ) {
+            chdata[ i ] = all_channels[ chan_count * i + ch ];
+        }
+    }
+    return WAV_OK;
+}
+
+wav_errors_e WavData::ConvertStereoToMono() {
+    extract_data_int16(myfilename);
+
+    int chan_count = (int)channels_data.size();
+
+    if ( chan_count != 2 ) {
+        return BAD_PARAMS;
+    }
+
+    int samples_count_per_chan = (int)channels_data[0].size();
+
+    // Verify that all channels have the same number of samples.
+    for ( size_t ch = 0; ch < chan_count; ch++ ) {
+        if ( channels_data[ ch ].size() != (size_t) samples_count_per_chan ) {
+            return BAD_PARAMS;
+        }
+    }
+
+    dest_mono.resize( 1 );
+    std::vector<short>& mono = dest_mono[ 0 ];
+    mono.resize( samples_count_per_chan );
+
+    // Mono channel is an arithmetic mean of all (two) channels.
+    for ( size_t i = 0; i < samples_count_per_chan; i++ ) {
+        mono[ i ] = ( channels_data[0][i] + channels_data[1][i] ) / 2;
+    }
+
+    return WAV_OK;
+}
+
+wav_errors_e make_wav_file(const char* filename) {
+    myfilenameOut = filename;
+    printf( ">>>> make_wav_file( %s )\n", myfilenameOut );
+    wav_errors_e err;
+    wav_header_s header;
+
+    int chan_count = (int)dest_mono.size();
+
+    if ( chan_count < 1 ) {
+        return BAD_PARAMS;
+    }
+
+    int samples_count_per_chan = (int)dest_mono[0].size();
+
+    // Verify that all channels have the same number of samples.
+    for ( size_t ch = 0; ch < chan_count; ch++ ) {
+        if ( dest_mono[ ch ].size() != (size_t) samples_count_per_chan ) {
+            return BAD_PARAMS;
+        }
+    }
+
+    err = fill_header( &header, chan_count, 16, sample_rate, samples_count_per_chan );
+    if ( err != WAV_OK ) {
+        return err;
+    }
+
+    std::vector<short> all_channels;
+    all_channels.resize( chan_count * samples_count_per_chan );
+
+    for ( int ch = 0; ch < chan_count; ch++ ) {
+        const std::vector<short>& chdata = dest_mono[ ch ];
+        for ( size_t i = 0; i < samples_count_per_chan; i++ ) {
+            all_channels[ chan_count * i + ch ] = chdata[ i ];
+        }
+    }
+
+    FILE* f = fopen( myfilenameOut, "wb" );
+    fwrite( &header, sizeof(wav_header_s), 1, f );
+    fwrite( all_channels.data(), sizeof(short), all_channels.size(), f );
+    if ( !f ) {
+        return IO_ERROR;
+    }
+
+    fclose( f );
+
+    return WAV_OK;
 }
